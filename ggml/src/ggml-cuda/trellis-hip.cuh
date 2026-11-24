@@ -152,19 +152,14 @@ static unsigned blocks(size_t count) {
     return (count + threads - 1) / threads;
 }
 
-static __global__ void half_input(const float * x, half * out, size_t count) {
-    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i < count) out[i] = __float2half(x[i]);
-}
-
 template<int bits>
-static __global__ void unpack_weights(const uint32_t * codes, half * out, int k, int first, size_t count) {
+static __global__ void unpack_weights(const uint32_t * codes, float * out, int k, int first, size_t count) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= count) return;
     const int row = first + i / k;
     const int col = i % k;
     const auto * tile = codes + (size_t(row / 16) * (k / 16) + col / 16) * (8 * bits);
-    out[i] = __float2half(float(decode_value<bits>(tile, row % 16, col % 16)));
+    out[i] = float(decode_value<bits>(tile, row % 16, col % 16));
 }
 
 template<int bits>
@@ -208,7 +203,7 @@ static void product(ggml_backend_cuda_context & ctx, const uint32_t * codes, con
         launch_product<bits>(codes, x, y, k, n, tokens, stream);
         return;
     }
-    // Opt-in comparison against the FP16 workspace path.
+    // Opt-in FP16 experiment for comparison with the default FP32 path.
     static const bool use_wmma = [] {
         const char * value = std::getenv("GGML_HIP_TRELLIS_WMMA");
         return value && value[0] == '1' && value[1] == '\0';
@@ -220,9 +215,8 @@ static void product(ggml_backend_cuda_context & ctx, const uint32_t * codes, con
     }
     // Bound temporary memory for large output-vocabulary bands.
     const int stripe = std::min(n, 4096);
-    ggml_cuda_pool_alloc<half> weights(ctx.pool(), size_t(stripe) * k);
-    ggml_cuda_pool_alloc<half> input(ctx.pool(), tokens * k);
-    half_input<<<blocks(tokens * k), threads, 0, stream>>>(x, input.ptr, tokens * k);
+    // Keep the transformed activations in FP32, including near cancellation.
+    ggml_cuda_pool_alloc<float> weights(ctx.pool(), size_t(stripe) * k);
     const float alpha = 1.0f, beta = 0.0f;
     auto handle = ctx.cublas_handle();
     CUBLAS_CHECK(cublasSetStream(handle, stream));
@@ -231,7 +225,7 @@ static void product(ggml_backend_cuda_context & ctx, const uint32_t * codes, con
         const size_t elements = size_t(count) * k;
         unpack_weights<bits><<<blocks(elements), threads, 0, stream>>>(codes, weights.ptr, k, row, elements);
         CUBLAS_CHECK(cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N,
-            count, tokens, k, &alpha, weights.ptr, CUDA_R_16F, k, input.ptr, CUDA_R_16F, k,
+            count, tokens, k, &alpha, weights.ptr, CUDA_R_32F, k, x, CUDA_R_32F, k,
             &beta, y + row, CUDA_R_32F, n, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
     }
 }

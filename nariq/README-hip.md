@@ -58,19 +58,73 @@ separate and validate it on CUDA hardware using the patched tree.
 Upstream qualification record
 https://github.com/nari-labs/nari-llama.cpp/blob/nariq/b12431/nariq/cuda-qualification.md
 
-## Measured numerical results
+## Numerical checks on the RX 7900 XTX
 
-The synthetic test failed at TRL1, mode 0, 35 input tokens, row 0
-(HIP -10.3191, CPU -10.3261). The same-GGUF model probe used the CPU
-backend with microbatch 8 and the same forced continuation for both
-HIP runs. Each comparison covered 12 full-vocabulary logit rows.
+The initial HIP bulk path converted transformed activations to FP16 before GEMM.
+In the synthetic TRL1 test, the first reported mismatch at a batch of 35 was
+-10.3191 on HIP versus -10.3261 on CPU. Keeping both GEMM inputs in FP32
+makes the default path pass TRL1–6 with the original tolerance. The documented
+CTest subset passed 7/7. The Python suite passed 20 tests and skipped two.
 
-| HIP microbatch | Mean KL | Max KL | Top-1 | Greedy tokens equal |
-| --- | ---: | ---: | ---: | --- |
-| 1 | 6.95e-9 | 1.99e-8 | 12/12 | Yes |
-| 8 | 6.46e-9 | 1.81e-8 | 12/12 | Yes |
+The tests below use the CPU backend with the same original GGUF and the same
+forced continuation. Each comparison covers 55 positions. All runs matched
+every top-1 token and the entire greedy continuation.
 
-To reproduce the same-GGUF comparison, use the original GGUF in the
-CPU reference command. The independent F32 artifact was generated,
-but CPU inference on it was stopped under memory and disk pressure.
-The table above uses the CPU backend of the coded GGUF.
+| Weight format | HIP microbatch | Mean KL | Max KL |
+| --- | ---: | ---: | ---: |
+| 3.0 bpw | 1 | 6.51e-9 | 5.99e-8 |
+| 3.0 bpw | 32 | 4.21e-6 | 4.82e-5 |
+| 2.5 bpw | 1 | 4.46e-9 | 4.56e-8 |
+| 2.5 bpw | 32 | 5.32e-6 | 5.74e-5 |
+| 2.0 bpw | 1 | 2.08e-8 | 5.82e-7 |
+| 2.0 bpw | 32 | 1.25e-5 | 3.80e-4 |
+
+## Performance on the RX 7900 XTX
+
+All measurements use 3.0 bpw, ROCm 7.2.4, Q8_0/Q8_0 KV, and batch and
+microbatch sizes of 1024.
+
+| Measurement | Initial HIP code | FP32 GEMM |
+| --- | ---: | ---: |
+| llama-bench pp2048 (2 runs) | 218.97 tok/s | 352.55 tok/s |
+| llama-bench tg32 (2 runs) | 6.19 tok/s | 6.32 tok/s |
+| Server prefill through 65,536 tokens | 205.26 tok/s | 312.09 tok/s |
+| Server prefill, 261,632 uncached tokens | 165.82 tok/s | 228.99 tok/s |
+| Server decode after full prefill (5 tokens) | 5.18 tok/s | 4.65 tok/s |
+| VRAM after request | 20.35 GiB | 20.51 GiB |
+
+On this host the short prefill improved 61%, and the long prefill improved
+38%, saving roughly 7 minutes 15 seconds. The GPU still does more attention
+work per token late in a long prompt. The five-token decode samples are
+too short to establish a decode regression.
+
+## CUDA build check
+
+The patched tree built and linked `ggml-cuda` with the bundled libtrellis
+using CUDA 12.4, GCC 13, and `sm_86`. Preprocessing the two modified CUDA
+translation units with the same flags showed no change to the CUDA Trellis
+implementation. In `ggml-cuda.cu`, the only differences were shifted source
+line numbers in diagnostics. A CUDA runtime regression check still needs an
+NVIDIA GPU.
+
+## Independent decoded-F32 comparison
+
+The upstream converter materialized F32 weights from each original coded
+GGUF. A CPU-only reference harness evaluated the prompt and forced
+continuation in one batch with mmap prefetch disabled to limit memory and
+disk pressure. The HIP side used the original GGUF and microbatches of
+1 and 32. Each comparison used 55 full-vocabulary logit rows. All greedy
+continuations matched. The comparator required max KL <= 0.001 and
+top-1 >= 98%.
+
+| Weight (bpw) | HIP microbatch | Mean KL | Max KL | Top-1 |
+| --- | ---: | ---: | ---: | ---: |
+| 3.0 | 1 | 5.85e-09 | 3.8e-08 | 55/55 |
+| 3.0 | 32 | 4.21e-06 | 4.87e-05 | 55/55 |
+| 2.5 | 1 | 4.41e-09 | 4.39e-08 | 55/55 |
+| 2.5 | 32 | 5.33e-06 | 5.74e-05 | 55/55 |
+| 2.0 | 1 | 2.82e-08 | 8.54e-07 | 55/55 |
+| 2.0 | 32 | 1.25e-05 | 0.000379 | 55/55 |
+
+This test covers a shorter sample than the upstream CUDA qualification
+(55 versus 510 positions).
