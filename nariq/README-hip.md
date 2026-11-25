@@ -98,26 +98,43 @@ On this host the short prefill improved 61%, and the long prefill improved
 work per token late in a long prompt. The five-token decode samples are
 too short to establish a decode regression.
 
-## Optional fused FWHT on gfx1100
+## Fused FWHT (on by default)
 
-Set `GGML_HIP_TRELLIS_LDS_FWHT=1` to run the supported FWHT stages and
-normalization in a single GPU workgroup. The existing FP32 Trellis product
-is used in both cases below.
+The supported FWHT stages and the normalization run in a single GPU workgroup
+per run instead of `log2(run)` butterfly launches plus a normalize pass. This
+is now the default; set `GGML_HIP_TRELLIS_LDS_FWHT=0` to get the per-stage
+path back. Both paths use the existing FP32 Trellis product.
 
 A/B results on RX 7900 XTX, ROCm 7.2.4, NariQ 3.0 bpw, Q8_0/Q8_0 KV,
 batch and microbatch 1024, three repetitions per case:
 
-| Benchmark | Default FWHT | Fused FWHT |
+| Benchmark | Per-stage FWHT | Fused FWHT |
 | --- | ---: | ---: |
 | pp2048 | 353.00 tok/s | 386.00 tok/s (+9.3%) |
 | tg32 | 6.64 tok/s | 7.56 tok/s (+13.9%) |
 
-The A/B test used upstream candidate `84a9af8` with the same opt-in
-implementation as this branch. `test-trellis ROCm0` passed TRL1–6 with
-both settings. With fused FWHT enabled, comparison against the independent
-decoded-F32 CPU reference gave 55/55 top-1 matches and identical greedy
-tokens for 3.0, 2.5 and 2.0 bpw. Mean KL was 4.21e-6, 5.33e-6 and 1.25e-5,
-respectively, matching the previous FP32 results.
+The A/B test used upstream candidate `84a9af8`. `test-trellis ROCm0` passed
+TRL1–6 with both settings. With fused FWHT enabled, comparison against the
+independent decoded-F32 CPU reference gave 55/55 top-1 matches and identical
+greedy tokens for 3.0, 2.5 and 2.0 bpw. Mean KL was 4.21e-6, 5.33e-6 and
+1.25e-5, respectively, matching the previous FP32 results.
+
+Independent confirmation on RDNA4 (gfx1201, RX 9070 XT, Windows 11, ROCm
+10.2.0 wheel toolchain, clang 24), same 3.0 bpw file, `-fa on -ctk q8_0
+-ctv q8_0`:
+
+| Benchmark | Per-stage FWHT | Fused FWHT |
+| --- | ---: | ---: |
+| pp512 | 573.36 tok/s | 665.18 tok/s (+16.0%) |
+| tg128 | 16.06 tok/s | 17.50 tok/s (+9.0%) |
+
+`test-trellis-model` against the same file's CPU backend gave max KL 1.90e-8,
+top-1 12/12 and identical greedy tokens in both configurations, and the
+prefill gain persisted at depth (`pp512 @ d16384` 555 -> 591 tok/s). These
+numbers come from a personal setup and were produced with an AI coding agent
+driving most of the work, so they are a second data point. Please check the
+patch before relying on them.
+
 
 ## CUDA build check
 
