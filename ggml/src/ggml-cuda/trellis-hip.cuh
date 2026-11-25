@@ -256,9 +256,13 @@ static __global__ void fwht_lds(float * data, int run, float factor) {
 }
 
 static void fwht(float * data, size_t count, int run, cudaStream_t stream) {
+    // Fused by default: one workgroup per run replaces log2(run) butterfly launches plus the
+    // normalize pass. A/B on two GPUs (RX 7900 XTX: tg32 6.64 -> 7.56, pp2048 353 -> 386;
+    // RX 9070 XT: tg128 16.06 -> 17.50, pp512 573 -> 665) with identical logits. Set
+    // GGML_HIP_TRELLIS_LDS_FWHT=0 to fall back to the per-stage path.
     static const bool use_lds = [] {
         const char * value = std::getenv("GGML_HIP_TRELLIS_LDS_FWHT");
-        return value && value[0] == '1' && value[1] == '\0';
+        return !(value && value[0] == '0' && value[1] == '\0');
     }();
     if (use_lds && run >= 16 && run <= 8192) {
         fwht_lds<<<count / run, threads, size_t(run) * sizeof(float), stream>>>(
