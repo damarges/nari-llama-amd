@@ -98,6 +98,27 @@ On this host the short prefill improved 61%, and the long prefill improved
 work per token late in a long prompt. The five-token decode samples are
 too short to establish a decode regression.
 
+## Optional fused FWHT on gfx1100
+
+Set `GGML_HIP_TRELLIS_LDS_FWHT=1` to run the supported FWHT stages and
+normalization in a single GPU workgroup. The existing FP32 Trellis product
+is used in both cases below.
+
+A/B results on RX 7900 XTX, ROCm 7.2.4, NariQ 3.0 bpw, Q8_0/Q8_0 KV,
+batch and microbatch 1024, three repetitions per case:
+
+| Benchmark | Default FWHT | Fused FWHT |
+| --- | ---: | ---: |
+| pp2048 | 353.00 tok/s | 386.00 tok/s (+9.3%) |
+| tg32 | 6.64 tok/s | 7.56 tok/s (+13.9%) |
+
+The A/B test used upstream candidate `84a9af8` with the same opt-in
+implementation as this branch. `test-trellis ROCm0` passed TRL1–6 with
+both settings. With fused FWHT enabled, comparison against the independent
+decoded-F32 CPU reference gave 55/55 top-1 matches and identical greedy
+tokens for 3.0, 2.5 and 2.0 bpw. Mean KL was 4.21e-6, 5.33e-6 and 1.25e-5,
+respectively, matching the previous FP32 results.
+
 ## CUDA build check
 
 The patched tree built and linked `ggml-cuda` with the bundled libtrellis
